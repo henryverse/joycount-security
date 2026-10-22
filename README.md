@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Document** | JC-SEC-2026-01 |
-| **Version** | 1.1 · 22 October 2026 |
+| **Version** | 1.2 · 22 October 2026 |
 | **Product** | JoyCount for iOS and iPadOS, version 3.0.2 |
 | **Component** | Auto Match — PlayStation, Nintendo Switch and Steam account linking |
 | **Assessment type** | First-party source code review by the JoyCount developer |
@@ -40,7 +40,7 @@ This assessment reviewed how JoyCount obtains, stores, uses and deletes the cred
 - **Credentials stay on the device.** They are stored only in the iOS Keychain with *this device only* access. They are never written to iCloud sync data, backups, logs or the widget extension.
 - **Unlinking deletes the stored credential immediately.**
 
-The review found **no high or medium severity issues**. It recorded **two low severity** and **three informational** findings ([section 6](#6-findings)). None of them lets another party read a user's credentials.
+The review found **no high or medium severity issues**. It recorded **two low severity** findings, both now **fixed**, and **three informational** findings that need no change ([section 6](#6-findings)). None of them let another party read a user's credentials.
 
 ## 2. Scope and method
 
@@ -182,9 +182,9 @@ Each sign-in creates a new 256-bit PKCE verifier and a new random `state` from t
 ```swift
 // Services/PSNLibraryProvider.swift
 static func makeAuthorizationRequest() throws -> (url: URL, state: String, codeVerifier: String) {
-    let verifier  = Self.randomURLSafeString(byteCount: 32)   // 256-bit secret, never leaves memory
-    let challenge = Self.sha256Base64URL(verifier)            // only the hash is sent
-    let state     = Self.randomURLSafeString(byteCount: 16)
+    let verifier  = try Self.randomURLSafeString(byteCount: 32)   // 256-bit secret, never leaves memory
+    let challenge = Self.sha256Base64URL(verifier)                // only the hash is sent
+    let state     = try Self.randomURLSafeString(byteCount: 16)
 
     var components = URLComponents(string: Self.authBase + "/authorize")
     components?.queryItems = [
@@ -199,9 +199,13 @@ static func makeAuthorizationRequest() throws -> (url: URL, state: String, codeV
     return (url, state, verifier)
 }
 
-static func randomURLSafeString(byteCount: Int) -> String {
+static func randomURLSafeString(byteCount: Int) throws -> String {
     var bytes = [UInt8](repeating: 0, count: byteCount)
-    _ = SecRandomCopyBytes(kSecRandomDefault, byteCount, &bytes)   // see finding JC-02
+    // If the system generator ever fails, refuse to sign in rather than
+    // fall back to predictable bytes (finding JC-02, fixed).
+    guard SecRandomCopyBytes(kSecRandomDefault, byteCount, &bytes) == errSecSuccess else {
+        throw AutoMatchError.server("random")
+    }
     return Data(bytes).base64URLEncodedString()
 }
 
@@ -258,7 +262,20 @@ static func authorizationCode(from url: URL, expectedState: String) throws -> St
 }
 ```
 
-The Nintendo check verifies the scheme, host and exact `state`, but is less strict about repeated parameters. See finding JC-01.
+The Nintendo check applies the same rules: scheme, host and path must match, and `state` and the code must each appear exactly once (finding JC-01, fixed).
+
+```swift
+// Services/NintendoLibraryProvider.swift
+// Nintendo returns its parameters in the URL fragment, so fragment and query
+// are read together, and each parameter must appear exactly once across both.
+let states = items.filter { $0.name == "state" }
+let codes  = items.filter { $0.name == "session_token_code" }
+guard states.count == 1, states.first?.value == expectedState,
+      codes.count == 1, let code = codes.first?.value, !code.isEmpty else {
+    throw AutoMatchError.invalidResponse
+}
+return code
+```
 
 ### 5.4 Keychain storage, this device only, never synced (T5)
 
@@ -363,11 +380,13 @@ Severity follows a four-level scale: **High** (credentials can be obtained by an
 
 | ID | Title | Severity | Status |
 |---|---|---|---|
-| JC-01 | Nintendo callback check is less strict than PlayStation's | Low | Open — planned |
-| JC-02 | Return value of the secure random generator is not checked | Low | Open — planned |
+| JC-01 | Nintendo callback check is less strict than PlayStation's | Low | **Fixed** |
+| JC-02 | Return value of the secure random generator is not checked | Low | **Fixed** |
 | JC-03 | Steam Web API key travels in the request address | Informational | Accepted (platform requirement) |
 | JC-04 | PlayStation and Nintendo interfaces are not public | Informational | Accepted, disclosed to users |
 | JC-05 | Artwork addresses from the platform are not limited to a host list | Informational | Accepted |
+
+*Fixed* means fixed in the source code. The fixes reach users in the next App Store update after 3.0.2. The descriptions below explain the behaviour as it was in 3.0.2.
 
 ### JC-01 · Nintendo callback check is less strict than PlayStation's — Low
 
@@ -375,7 +394,7 @@ Severity follows a four-level scale: **High** (credentials can be obtained by an
 
 **Impact.** No path to exposure is known. A planted callback would still need the correct random `state` for the attempt in progress, and the code exchange would still need the PKCE verifier, which never leaves memory.
 
-**Recommendation.** Apply the same parameter-count and path checks used for PlayStation (section 5.3).
+**Resolution.** The Nintendo check now applies the same scheme, host, path and parameter-count rules as PlayStation. A reply with a repeated `state` or code, including one repeated across the fragment and the query, is rejected. Covered by automated tests (section 5.3).
 
 ### JC-02 · Return value of the secure random generator is not checked — Low
 
@@ -383,7 +402,7 @@ Severity follows a four-level scale: **High** (credentials can be obtained by an
 
 **Impact.** On iOS this call is not known to fail in normal operation. The sign-in would also need to be intercepted at the same moment.
 
-**Recommendation.** Check for `errSecSuccess` and stop the sign-in if the call fails.
+**Resolution.** The return value is now checked for both platforms. If the call fails, the sign-in stops with an error and nothing is sent to the platform (section 5.2).
 
 ### JC-03 · Steam Web API key travels in the request address — Informational
 
@@ -431,3 +450,4 @@ If you believe you have found a security issue in Auto Match, please open an iss
 |---|---|---|
 | 1.0 | 22 Oct 2026 | First publication |
 | 1.1 | 22 Oct 2026 | Added architecture diagrams, threat model, source code evidence and formal findings |
+| 1.2 | 22 Oct 2026 | JC-01 and JC-02 fixed; code evidence updated |

@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **文档编号** | JC-SEC-2026-01 |
-| **版本** | 1.1 · 2026 年 10 月 22 日 |
+| **版本** | 1.2 · 2026 年 10 月 22 日 |
 | **产品** | JoyCount（iOS / iPadOS）3.0.2 |
 | **组件** | 自动匹配 —— PlayStation、Nintendo Switch、Steam 账号关联 |
 | **评估类型** | JoyCount 开发者对源代码进行的自查审计 |
@@ -40,7 +40,7 @@
 - **凭据只留在本机**：仅存于 iOS 钥匙串，访问级别为「仅限此设备」，绝不写入 iCloud 同步数据、备份、日志或小组件扩展。
 - **取消关联会立即删除已保存的凭据。**
 
-本次审查**未发现高危或中危问题**，记录了 **2 项低危**与 **3 项提示性**发现（见[第 6 节](#6-发现的问题)），均不会让任何其他方读取用户凭据。
+本次审查**未发现高危或中危问题**，记录的 **2 项低危**发现均已**修复**，另有 **3 项提示性**发现无需修改（见[第 6 节](#6-发现的问题)）。这些发现均不会让任何其他方读取用户凭据。
 
 ## 2. 范围与方法
 
@@ -182,9 +182,9 @@ private func present(url: URL, scheme: String) async throws -> URL {
 ```swift
 // Services/PSNLibraryProvider.swift
 static func makeAuthorizationRequest() throws -> (url: URL, state: String, codeVerifier: String) {
-    let verifier  = Self.randomURLSafeString(byteCount: 32)   // 256-bit secret, never leaves memory
-    let challenge = Self.sha256Base64URL(verifier)            // only the hash is sent
-    let state     = Self.randomURLSafeString(byteCount: 16)
+    let verifier  = try Self.randomURLSafeString(byteCount: 32)   // 256-bit secret, never leaves memory
+    let challenge = Self.sha256Base64URL(verifier)                // only the hash is sent
+    let state     = try Self.randomURLSafeString(byteCount: 16)
 
     var components = URLComponents(string: Self.authBase + "/authorize")
     components?.queryItems = [
@@ -199,9 +199,13 @@ static func makeAuthorizationRequest() throws -> (url: URL, state: String, codeV
     return (url, state, verifier)
 }
 
-static func randomURLSafeString(byteCount: Int) -> String {
+static func randomURLSafeString(byteCount: Int) throws -> String {
     var bytes = [UInt8](repeating: 0, count: byteCount)
-    _ = SecRandomCopyBytes(kSecRandomDefault, byteCount, &bytes)   // see finding JC-02
+    // If the system generator ever fails, refuse to sign in rather than
+    // fall back to predictable bytes (finding JC-02, fixed).
+    guard SecRandomCopyBytes(kSecRandomDefault, byteCount, &bytes) == errSecSuccess else {
+        throw AutoMatchError.server("random")
+    }
     return Data(bytes).base64URLEncodedString()
 }
 
@@ -258,7 +262,20 @@ static func authorizationCode(from url: URL, expectedState: String) throws -> St
 }
 ```
 
-Nintendo 的校验会核对 scheme、host 和精确的 `state`，但对重复参数不如 PlayStation 严格，见发现 JC-01。
+Nintendo 的校验采用相同规则：scheme、host、路径必须匹配，`state` 与授权码都必须恰好出现一次（发现 JC-01，已修复）。
+
+```swift
+// Services/NintendoLibraryProvider.swift
+// Nintendo returns its parameters in the URL fragment, so fragment and query
+// are read together, and each parameter must appear exactly once across both.
+let states = items.filter { $0.name == "state" }
+let codes  = items.filter { $0.name == "session_token_code" }
+guard states.count == 1, states.first?.value == expectedState,
+      codes.count == 1, let code = codes.first?.value, !code.isEmpty else {
+    throw AutoMatchError.invalidResponse
+}
+return code
+```
 
 ### 5.4 钥匙串存储，仅限此设备，绝不同步（T5）
 
@@ -363,11 +380,13 @@ Steam Key 输入框是 `SecureField`：屏幕上隐藏显示，也不会进入�
 
 | 编号 | 标题 | 严重程度 | 状态 |
 |---|---|---|---|
-| JC-01 | Nintendo 回调校验不如 PlayStation 严格 | 低危 | 待修复 —— 已排期 |
-| JC-02 | 未检查安全随机数生成器的返回值 | 低危 | 待修复 —— 已排期 |
+| JC-01 | Nintendo 回调校验不如 PlayStation 严格 | 低危 | **已修复** |
+| JC-02 | 未检查安全随机数生成器的返回值 | 低危 | **已修复** |
 | JC-03 | Steam Web API Key 位于请求地址中 | 提示 | 接受（平台要求） |
 | JC-04 | PlayStation 与 Nintendo 接口并非公开接口 | 提示 | 接受，已向用户说明 |
 | JC-05 | 平台返回的封面地址未限定主机列表 | 提示 | 接受 |
+
+「已修复」指源代码已修复，将随 3.0.2 之后的下一次 App Store 更新送达用户。下文的「说明」描述的是 3.0.2 中的行为。
 
 ### JC-01 · Nintendo 回调校验不如 PlayStation 严格 —— 低危
 
@@ -375,7 +394,7 @@ Steam Key 输入框是 `SecureField`：屏幕上隐藏显示，也不会进入�
 
 **影响。** 没有已知的暴露路径。伪造的回调仍需猜中本次登录的随机 `state`，换取令牌时仍需只存在于内存中的 PKCE verifier。
 
-**建议。** 采用与 PlayStation 相同的参数计数和路径校验（见 5.3 节）。
+**处理结果。** Nintendo 校验现已采用与 PlayStation 相同的 scheme、host、路径与参数计数规则。`state` 或授权码重复出现（包括在 fragment 与 query 中各出现一次）的回调一律拒绝，并有自动化测试覆盖（见 5.3 节）。
 
 ### JC-02 · 未检查安全随机数生成器的返回值 —— 低危
 
@@ -383,7 +402,7 @@ Steam Key 输入框是 `SecureField`：屏幕上隐藏显示，也不会进入�
 
 **影响。** 在 iOS 上，该调用在正常运行时不会失败；而且攻击者还需同时截获这次登录。
 
-**建议。** 检查返回值是否为 `errSecSuccess`，失败时中止登录。
+**处理结果。** 两个平台现在都会检查返回值；调用失败时登录会以错误中止，不会向平台发送任何内容（见 5.2 节）。
 
 ### JC-03 · Steam Web API Key 位于请求地址中 —— 提示
 
@@ -431,3 +450,4 @@ Steam Key 输入框是 `SecureField`：屏幕上隐藏显示，也不会进入�
 |---|---|---|
 | 1.0 | 2026-10-22 | 首次发布 |
 | 1.1 | 2026-10-22 | 新增架构图、威胁模型、源码佐证与正式的发现列表 |
+| 1.2 | 2026-10-22 | 修复 JC-01 与 JC-02，更新源码佐证 |
