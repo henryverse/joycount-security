@@ -1,134 +1,433 @@
-# JoyCount Auto Match — Sign-in Security Review
+# JoyCount Auto Match — Account Sign-in Security Assessment
 
-*Reviewed against JoyCount 3.0.2 · October 2026* · [简体中文](#简体中文)
+[English](README.md) · [简体中文](README.zh-Hans.md)
 
-Auto Match reads the list of games you own on PlayStation, Nintendo Switch and Steam so you can add them to your JoyCount collection. This page explains, in plain terms, what happens when you link an account, what JoyCount stores, and who it talks to.
-
-**In short:** only two parties are ever involved — **you** and **the platform you sign in to**. JoyCount has no server of its own for Auto Match; your sign-in never passes through anyone else.
-
----
-
-## Who JoyCount talks to
-
-| Platform | Where requests go | Nothing else |
-|---|---|---|
-| PlayStation | Sony's account and PlayStation Network servers | ✓ |
-| Nintendo Switch | Nintendo Account and Nintendo's own servers | ✓ |
-| Steam | Steam's Web API and Steam's own image servers | ✓ |
-
-- Every request is made directly from your device to the platform over HTTPS.
-- There is no JoyCount account, no JoyCount server, no analytics and no relay in between.
-- Game artwork is downloaded from the same platform the game came from, without sending any of your credentials.
-
-## PlayStation and Nintendo: you sign in on the platform's own page
-
-1. When you tap **Sign in**, iOS opens the platform's own sign-in page in a secure system sheet. JoyCount cannot read or type into that page.
-2. **JoyCount never sees your password**, your two-step verification codes or your passkeys. You enter them only on Sony's or Nintendo's page.
-3. The sheet uses a **private browsing session**: it does not reuse cookies from Safari or a previous sign-in, and nothing is left behind afterwards. This is also why linking a second account never signs you in to the first one by mistake.
-4. The sign-in uses the industry-standard authorization flow with **PKCE** (a one-time secret generated on your device) and a random **state** value. JoyCount rejects any reply that does not carry the exact values it generated for that sign-in, so a link from another app or website cannot inject a login.
-5. After you sign in, the platform gives JoyCount a token that only lets it read your profile name and your game list. JoyCount does not request permission to buy, message, change settings or access payment details.
-
-> **Please note.** PlayStation and Nintendo do not offer a public library interface for apps like JoyCount. Auto Match uses the same sign-in your platform's own mobile app uses. It works today, but the platform may change or block it at any time. If it stops working, JoyCount shows an error and your collection is not affected.
-
-## Steam: your own key, and a public profile link
-
-Steam offers an official Web API, so no sign-in page is needed.
-
-1. Create a Web API key on Steam's developer page (`steamcommunity.com/dev/apikey`) and paste it into JoyCount.
-2. Paste your **Steam profile link** (for example `steamcommunity.com/id/yourname` or `steamcommunity.com/profiles/7656…`). JoyCount turns it into your account number using Steam's own API.
-3. Your Steam password is never asked for and never entered anywhere in JoyCount.
-4. The key is checked with Steam before it is saved. If Steam rejects it, nothing is stored.
-
-> **Please note.** A Steam Web API key can read any **public** Steam profile, and Steam's API expects the key inside the request address. JoyCount only sends it to Steam over HTTPS, but treat the key like a password: do not share it. Your game list must be set to public in Steam's privacy settings for Auto Match to see it.
-
-## What is stored, and where
-
-| What | Where | Leaves your device? |
-|---|---|---|
-| PlayStation / Nintendo sign-in tokens | iOS Keychain | **No** |
-| Steam Web API key and account number | iOS Keychain | **No** |
-| Linked account names | JoyCount's local settings | No |
-| Games you choose to import | Your JoyCount collection | Only through your own iCloud sync |
-
-- Credentials are saved with the Keychain setting **"this device only"**: they are not copied to iCloud Keychain, not restored onto another device from a backup, and not shared with JoyCount's widgets.
-- Credentials are **never** written into JoyCount's iCloud sync files or Excel backups. Signing in on a new device means signing in again.
-- Your password is never stored, because JoyCount never has it.
-
-## Unlinking and revoking access
-
-- **In JoyCount:** open Auto Match → your account → **Unlink**. The stored token or key is deleted from the Keychain immediately. Games already in your collection are kept.
-- **On PlayStation:** in your Sony account's security settings, sign out of all devices or change your password. This revokes the token JoyCount holds.
-- **On Nintendo:** in your Nintendo Account's sign-in and security settings, sign out of all devices or change your password.
-- **On Steam:** revoke the key on the same developer page where you created it. JoyCount stops working with it immediately.
-
-## What this review checked
-
-- The sign-in sheet runs in a private session and is the platform's own page.
-- PKCE (S256) and a random `state` value are generated fresh for every sign-in and are verified on return.
-- The sign-in reply is checked for the expected app address before anything is accepted; the error description sent by the server is never shown in the app.
-- Tokens and keys are saved only to the Keychain with device-only access, and only after the platform has accepted them.
-- Unlinking deletes the stored credential.
-- No credential is included in sync data, backups, logs or artwork downloads.
-- Every Auto Match network address belongs to the platform being used.
-
-## Reporting a problem
-
-If you think you have found a security issue in Auto Match, please open an issue in this repository. Please do not post your tokens, keys or passwords.
+| | |
+|---|---|
+| **Document** | JC-SEC-2026-01 |
+| **Version** | 1.1 · 22 October 2026 |
+| **Product** | JoyCount for iOS and iPadOS, version 3.0.2 |
+| **Component** | Auto Match — PlayStation, Nintendo Switch and Steam account linking |
+| **Assessment type** | First-party source code review by the JoyCount developer |
+| **Status** | Final |
 
 ---
 
-## 简体中文
+## Contents
 
-*基于 JoyCount 3.0.2 审查 · 2026 年 10 月*
+1. [Executive summary](#1-executive-summary)
+2. [Scope and method](#2-scope-and-method)
+3. [Architecture and data flow](#3-architecture-and-data-flow)
+4. [Threat model](#4-threat-model)
+5. [Security controls, with source evidence](#5-security-controls-with-source-evidence)
+6. [Findings](#6-findings)
+7. [Residual risks for users](#7-residual-risks-for-users)
+8. [Revoking access](#8-revoking-access)
+9. [Reporting a vulnerability](#9-reporting-a-vulnerability)
+10. [Revision history](#10-revision-history)
 
-「自动匹配」会读取你在 PlayStation、Nintendo Switch 和 Steam 上拥有的游戏，方便你加进 JoyCount 的收藏。本页用通俗的方式说明：关联账号时发生了什么、JoyCount 保存了什么、它会和谁通信。
+---
 
-**一句话：** 整个过程只涉及两方 —— **你**，以及**你登录的那个游戏平台**。自动匹配没有 JoyCount 自己的服务器，你的登录不会经过任何其他人。
+## 1. Executive summary
 
-### JoyCount 会和谁通信
+Auto Match reads the list of games a user owns on PlayStation, Nintendo Switch and Steam, so the user can add them to their JoyCount collection.
 
-- PlayStation：只连接 Sony 的账号与 PlayStation Network 服务器。
-- Nintendo Switch：只连接 Nintendo 账号与任天堂自己的服务器。
-- Steam：只连接 Steam Web API 和 Steam 自己的图片服务器。
-- 所有请求都从你的设备经 HTTPS 直接发往平台；中间没有 JoyCount 账号、服务器、统计分析或中转。
-- 游戏封面从该游戏所属的平台下载，下载时不携带任何凭据。
+This assessment reviewed how JoyCount obtains, stores, uses and deletes the credentials behind that feature. The main conclusions are:
 
-### PlayStation 与 Nintendo：在平台自己的页面上登录
+- **Only two parties are involved: the user and the platform they sign in to.** JoyCount runs no server for Auto Match. Every request goes straight from the device to Sony, Nintendo or Valve over HTTPS.
+- **JoyCount never handles the user's platform password.** PlayStation and Nintendo sign-in happens on the platform's own web page, in a private system browser session. Steam needs no password at all.
+- **Sign-in is protected against forged or intercepted callbacks** by PKCE (S256) and a random `state` value, both made fresh for each attempt and checked strictly when the platform replies.
+- **Credentials stay on the device.** They are stored only in the iOS Keychain with *this device only* access. They are never written to iCloud sync data, backups, logs or the widget extension.
+- **Unlinking deletes the stored credential immediately.**
 
-1. 点「登录」后，iOS 会在系统的安全登录面板中打开平台自己的登录页。JoyCount 无法读取或填写这个页面。
-2. **JoyCount 永远看不到你的密码**、两步验证码或通行密钥，这些只会输入在 Sony 或任天堂的页面上。
-3. 登录面板使用**无痕会话**：不会沿用 Safari 或上一次登录的 Cookie，结束后也不留下任何东西。所以关联第二个账号时，不会误登进第一个账号。
-4. 登录采用行业标准的授权流程，带 **PKCE**（在你设备上生成的一次性密钥）和随机 **state**。返回的结果必须与本次登录生成的值完全一致，否则一律拒绝，其他 App 或网页无法伪造登录。
-5. 登录后平台给 JoyCount 的令牌只能读取你的昵称和游戏列表。JoyCount 不会申请购买、发消息、改设置或查看支付信息的权限。
+The review found **no high or medium severity issues**. It recorded **two low severity** and **three informational** findings ([section 6](#6-findings)). None of them lets another party read a user's credentials.
 
-> **请注意：** PlayStation 和任天堂没有为 JoyCount 这类 App 提供公开的游戏库接口。自动匹配使用的是平台自家手机 App 的同一套登录方式，目前可用，但平台随时可能更改或停用。一旦失效，JoyCount 会显示错误，你的收藏不受影响。
+## 2. Scope and method
 
-### Steam：你自己的 Key 和公开的个人资料链接
+### In scope
 
-1. 在 Steam 开发者页面（`steamcommunity.com/dev/apikey`）创建一个 Web API Key，粘贴到 JoyCount。
-2. 粘贴你的 **Steam 个人资料链接**（例如 `steamcommunity.com/id/你的名字` 或 `steamcommunity.com/profiles/7656…`）。JoyCount 用 Steam 自己的接口把它换算成账号编号。
-3. JoyCount 不会索要、也没有任何地方需要输入你的 Steam 密码。
-4. 保存前会先向 Steam 校验 Key；Steam 拒绝时不会保存任何东西。
+| Area | Source files |
+|---|---|
+| Sign-in user interface | `Views/AutoMatchView.swift` |
+| PlayStation sign-in and library | `Services/PSNLibraryProvider.swift` |
+| Nintendo sign-in and library | `Services/NintendoLibraryProvider.swift` |
+| Steam linking and library | `Services/SteamLibraryProvider.swift` |
+| Credential storage | `Services/AutoMatchCredentialStore.swift` |
+| Network client | `Services/AutoMatchHTTPClient.swift` |
+| Artwork download | `Services/AutoMatchCoverFetcher.swift` |
+| Account lifecycle | `Services/AutoMatchCoordinator.swift` |
 
-> **请注意：** Steam Web API Key 可以读取任何**公开**的 Steam 资料，而且 Steam 的接口要求把 Key 放在请求地址里。JoyCount 只会经 HTTPS 把它发给 Steam，但请像对待密码一样保管它，不要分享。另外需要在 Steam 隐私设置里把游戏详情设为公开，自动匹配才能看到。
+### Out of scope
 
-### 保存了什么、保存在哪
+The platforms' own servers and sign-in pages; iOS itself; JoyCount features other than Auto Match.
 
-- PlayStation / Nintendo 登录令牌：iOS 钥匙串，**不离开本机**。
-- Steam Web API Key 与账号编号：iOS 钥匙串，**不离开本机**。
-- 已关联账号的名称：JoyCount 本地设置。
-- 你选择导入的游戏：你的 JoyCount 收藏，仅通过你自己的 iCloud 同步。
-- 凭据以「**仅限此设备**」方式保存：不进 iCloud 钥匙串，不会通过备份恢复到其他设备，也不与 JoyCount 的小组件共享。
-- 凭据**绝不会**写进 JoyCount 的 iCloud 同步文件或 Excel 备份。换新设备需要重新登录。
-- JoyCount 从未拿到你的密码，所以也不会保存它。
+### Method
 
-### 取消关联与撤销授权
+1. Manual line-by-line review of every file listed above.
+2. A list of every network address the component contacts, checked against platform ownership.
+3. A trace of every credential from the moment it is created to the moment it is deleted.
+4. A check of the app's network security settings (App Transport Security).
 
-- **在 JoyCount 中：** 自动匹配 → 你的账号 → **取消关联**。保存的令牌或 Key 会立即从钥匙串删除，已加入收藏的游戏保留。
-- **PlayStation：** 在 Sony 账号的安全设置中退出所有设备或修改密码，即可撤销 JoyCount 持有的令牌。
-- **Nintendo：** 在 Nintendo 账号的登录与安全设置中退出所有设备或修改密码。
-- **Steam：** 在创建 Key 的同一个开发者页面撤销它，JoyCount 会立刻无法再使用。
+The code excerpts in this report are taken from the reviewed build. They have been shortened, and comments translated, for readability. Non-security details such as the platforms' public app identifiers are left out.
 
-### 反馈问题
+## 3. Architecture and data flow
 
-如果你认为自动匹配存在安全问题，请在本仓库提交 Issue。请不要贴出你的令牌、Key 或密码。
+### 3.1 PlayStation and Nintendo
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant A as JoyCount (on device)
+    participant S as System sign-in sheet<br/>(private session)
+    participant P as Platform<br/>(Sony / Nintendo)
+
+    A->>A: Generate PKCE verifier + random state
+    A->>S: Open platform sign-in page<br/>(code_challenge, state)
+    U->>S: Enter password / 2FA on the platform's page
+    S->>P: Credentials go to the platform only
+    P-->>S: Redirect with authorization code + state
+    S-->>A: Callback URL
+    A->>A: Verify callback address and state exactly
+    A->>P: Exchange code + PKCE verifier for tokens (HTTPS)
+    P-->>A: Tokens
+    A->>A: Save tokens to Keychain (this device only)
+    A->>P: Read profile name and game list (HTTPS)
+```
+
+### 3.2 Steam
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant A as JoyCount (on device)
+    participant V as Steam Web API
+
+    U->>A: Paste own Web API key + profile link
+    A->>V: Resolve profile link to account number (HTTPS)
+    A->>V: Check key by reading the profile name (HTTPS)
+    alt Key accepted
+        A->>A: Save key + account number to Keychain
+    else Key rejected
+        A->>A: Save nothing, show error
+    end
+```
+
+### 3.3 Network addresses
+
+| Platform | Purpose | Host | Owner |
+|---|---|---|---|
+| PlayStation | Sign-in and tokens | `ca.account.sony.com` | Sony |
+| PlayStation | Profile and games | `m.np.playstation.com` | Sony |
+| Nintendo | Sign-in and tokens | `accounts.nintendo.com`, `api.accounts.nintendo.com` | Nintendo |
+| Nintendo | Play history | `app-api.znej.nintendo.com` | Nintendo |
+| Nintendo | Store data and artwork | `ec.nintendo.com`, `*.cdn.nintendo.net` | Nintendo |
+| Steam | Web API | `api.steampowered.com` | Valve |
+| Steam | Artwork | `*.steamstatic.com` | Valve |
+
+No other hosts are contacted by Auto Match.
+
+## 4. Threat model
+
+| ID | Threat | Example | Mitigation | Section |
+|---|---|---|---|---|
+| T1 | Password captured by the app | App shows its own login form | Sign-in only on the platform's page in a system sheet | 5.1 |
+| T2 | Session reused or mixed up | Second account signs in as the first | Private (ephemeral) browser session | 5.1 |
+| T3 | Authorization code intercepted | Another app registers the same callback | PKCE S256 binds the code to this device | 5.2 |
+| T4 | Forged sign-in reply (CSRF) | A web link opens the callback with a planted code | Random `state`, checked exactly | 5.2, 5.3 |
+| T5 | Credentials copied off the device | Through iCloud sync, backup or file sharing | Keychain, *this device only*, never in sync data | 5.4 |
+| T6 | Credentials sent in clear text | Network on public Wi-Fi | HTTPS only, enforced by iOS | 5.5 |
+| T7 | Credentials leak to another host | Artwork server receives a token | Tokens sent only to platform API hosts | 5.5 |
+| T8 | Credentials left behind | User unlinks but key stays | Unlink deletes the Keychain item | 5.6 |
+| T9 | Bad key saved | Typo stored and retried forever | Key verified with Steam before saving | 5.7 |
+| T10 | Server text injected into the UI | Misleading error message | Platform error descriptions are never shown | 5.3 |
+
+## 5. Security controls, with source evidence
+
+### 5.1 Sign-in on the platform's own page, in a private session (T1, T2)
+
+JoyCount has no password field for PlayStation or Nintendo. It uses `ASWebAuthenticationSession`, the iOS system sign-in sheet. The app cannot read or change what the user types into it. `prefersEphemeralWebBrowserSession` makes iOS start a clean session with no shared cookies, and throw it away afterwards.
+
+```swift
+// Views/AutoMatchView.swift — AutoMatchWebLogin
+private func present(url: URL, scheme: String) async throws -> URL {
+    try await withCheckedThrowingContinuation { continuation in
+        let session = ASWebAuthenticationSession(url: url, callbackURLScheme: scheme) { callbackURL, error in
+            if let error {
+                continuation.resume(throwing: error)
+            } else if let callbackURL {
+                continuation.resume(returning: callbackURL)
+            } else {
+                continuation.resume(throwing: AutoMatchError.invalidResponse)
+            }
+        }
+        session.presentationContextProvider = AutoMatchPresentationAnchorProvider.shared
+        // Private session: no cookies from Safari or from an earlier sign-in.
+        session.prefersEphemeralWebBrowserSession = true
+        self.session = session
+        if !session.start() {
+            continuation.resume(throwing: AutoMatchError.server("session"))
+        }
+    }
+}
+```
+
+If the user leaves the screen, the pending sign-in is cancelled (`webLogin.cancel()` in `onDisappear`).
+
+### 5.2 PKCE and `state` made fresh for every attempt (T3, T4)
+
+Each sign-in creates a new 256-bit PKCE verifier and a new random `state` from the system's secure random number generator. Only the SHA-256 hash of the verifier (the *challenge*) goes into the sign-in address. The verifier itself stays in memory and is sent only once, in the HTTPS code exchange. An intercepted authorization code is useless without it.
+
+```swift
+// Services/PSNLibraryProvider.swift
+static func makeAuthorizationRequest() throws -> (url: URL, state: String, codeVerifier: String) {
+    let verifier  = Self.randomURLSafeString(byteCount: 32)   // 256-bit secret, never leaves memory
+    let challenge = Self.sha256Base64URL(verifier)            // only the hash is sent
+    let state     = Self.randomURLSafeString(byteCount: 16)
+
+    var components = URLComponents(string: Self.authBase + "/authorize")
+    components?.queryItems = [
+        URLQueryItem(name: "response_type",         value: "code"),
+        URLQueryItem(name: "redirect_uri",          value: Self.redirectURI),
+        URLQueryItem(name: "code_challenge",        value: challenge),
+        URLQueryItem(name: "code_challenge_method", value: "S256"),
+        URLQueryItem(name: "state",                 value: state),
+        // client_id and scope omitted
+    ]
+    guard let url = components?.url else { throw AutoMatchError.invalidURL }
+    return (url, state, verifier)
+}
+
+static func randomURLSafeString(byteCount: Int) -> String {
+    var bytes = [UInt8](repeating: 0, count: byteCount)
+    _ = SecRandomCopyBytes(kSecRandomDefault, byteCount, &bytes)   // see finding JC-02
+    return Data(bytes).base64URLEncodedString()
+}
+
+static func sha256Base64URL(_ input: String) -> String {
+    Data(SHA256.hash(data: Data(input.utf8))).base64URLEncodedString()
+}
+```
+
+Nintendo uses the same pattern with a 288-bit `state`. Nintendo names the PKCE fields differently (`session_token_code_challenge`), but the protection is the same.
+
+### 5.3 Strict checks on the sign-in reply (T4, T10)
+
+The reply from the platform arrives as a URL that any app or web page could also try to open, so JoyCount treats it as untrusted input. For PlayStation, every part of the reply must match exactly before the code is accepted:
+
+```swift
+// Services/PSNLibraryProvider.swift
+static func authorizationCode(from url: URL, expectedState: String) throws -> String {
+    guard let allowed  = URLComponents(string: redirectURI),
+          let callback = URLComponents(url: url, resolvingAgainstBaseURL: false),
+          callback.scheme?.lowercased() == allowed.scheme?.lowercased(),
+          callback.host?.lowercased()   == allowed.host?.lowercased(),
+          callback.percentEncodedPath.isEmpty || callback.percentEncodedPath == "/",
+          callback.user == nil, callback.password == nil,
+          callback.port == nil, callback.fragment == nil,
+          !expectedState.isEmpty else {
+        throw AutoMatchError.invalidResponse
+    }
+
+    let items  = callback.queryItems ?? []
+    let states = items.filter { $0.name == "state" }
+    let codes  = items.filter { $0.name == "code" }
+    let errors = items.filter { $0.name == "error" }
+
+    // Exactly one state, and it must be ours. No duplicated parameters.
+    // A reply carries either a code or an error, never both.
+    guard states.count == 1, states.first?.value == expectedState,
+          codes.count <= 1, errors.count <= 1,
+          codes.isEmpty || errors.isEmpty else {
+        throw AutoMatchError.invalidResponse
+    }
+
+    if let error = errors.first {
+        // error_description is untrusted server text: never shown in the UI.
+        if error.value == "login_required" || error.value == "invalid_grant" {
+            throw AutoMatchError.reauthRequired(.playStation)
+        }
+        throw AutoMatchError.server(error.value ?? "unknown")
+    }
+
+    guard let code = codes.first?.value, !code.isEmpty else {
+        throw AutoMatchError.invalidResponse
+    }
+    return code
+}
+```
+
+The Nintendo check verifies the scheme, host and exact `state`, but is less strict about repeated parameters. See finding JC-01.
+
+### 5.4 Keychain storage, this device only, never synced (T5)
+
+All Auto Match credentials go through a single type, `AutoMatchCredential`, which is only ever written to the Keychain. Each linked account has its own Keychain item.
+
+```swift
+// Services/AutoMatchCredentialStore.swift
+func save(_ credential: AutoMatchCredential, key: String) throws {
+    let data = try JSONEncoder().encode(credential)
+    let attributes: [String: Any] = [kSecValueData as String: data]
+    let updateStatus = SecItemUpdate(baseQuery(key: key) as CFDictionary, attributes as CFDictionary)
+    if updateStatus == errSecSuccess { return }
+    guard updateStatus == errSecItemNotFound else {
+        throw AutoMatchKeychainError(status: updateStatus, operation: "update")
+    }
+
+    var addQuery = baseQuery(key: key)
+    addQuery[kSecValueData as String] = data
+    // Readable after first unlock; never synced to iCloud Keychain,
+    // never restored onto a different device.
+    addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+    guard addStatus == errSecSuccess else {
+        throw AutoMatchKeychainError(status: addStatus, operation: "add")
+    }
+}
+```
+
+The design rules are:
+
+- **Not shared with extensions.** No Keychain access group is declared for these items. The widget extension cannot read them.
+- **Never in iCloud sync data.** JoyCount's iCloud sync files can be seen by the user in the Files app. Credentials are kept out of that format on purpose, and the sync code has no reference to `AutoMatchCredential`.
+- **Account list is kept apart from secrets.** The list of linked accounts (display name and account number only) is kept in local app settings, with no token or key.
+- **Safe migration.** When credentials are moved from the old storage format, the new item is written before the old one is deleted. A failure never loses a credential.
+
+### 5.5 Transport security (T6, T7)
+
+- The app declares **no App Transport Security exceptions** (`NSAppTransportSecurity` is absent). iOS therefore refuses any non-HTTPS connection, and any HTTPS connection without a valid certificate, before a request is sent.
+- Every Auto Match address is a hard-coded `https://` constant pointing at the platform (section 3.3).
+- **Tokens and keys are sent only to platform API hosts.** The artwork downloader builds its own plain request that carries no credential:
+
+```swift
+// Services/AutoMatchCoverFetcher.swift
+var request = URLRequest(url: cover.url)
+request.timeoutInterval = 30
+request.setValue("image/*", forHTTPHeaderField: "Accept")   // no Authorization header, no key
+let (data, response) = try await session.data(for: request)
+```
+
+- The app never builds credentials into its binary. The shared HTTP client has no fallback key. Every credential it uses belongs to the user.
+
+### 5.6 Unlinking deletes the credential (T8)
+
+```swift
+// Services/AutoMatchCoordinator.swift
+func unlink(_ account: AutoMatchAccount) {
+    provider(for: account).disconnect()   // SecItemDelete on this account's Keychain item
+    AutoMatchAccountStore.remove(account)
+    AutoMatchSeenGames.removeBaseline(for: account)
+    snapshot.removeAccount(account.id)
+    persist()
+    reloadAccounts()
+    rebuildDrafts()
+}
+```
+
+Deleting an item that is already gone counts as success, so unlinking always completes. Games already in the user's collection are kept, because they are the user's own records.
+
+### 5.7 Steam key is verified before it is saved (T9)
+
+```swift
+// Services/SteamLibraryProvider.swift
+static func link(apiKey: String, accountInput: String, /* … */) async throws -> AutoMatchAccount {
+    let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedKey.isEmpty else { throw AutoMatchError.invalidSteamKey }
+
+    let steamID = try await probe.resolveSteamID(accountInput, apiKey: trimmedKey)
+    // Ask Steam for this profile's name with the key. If Steam rejects the key,
+    // or the profile does not match, stop here: nothing is written.
+    guard let summary = try await probe.playerSummary(steamID: steamID, apiKey: trimmedKey),
+          let personaName = summary.personaname, !personaName.isEmpty else {
+        throw AutoMatchError.invalidSteamKey
+    }
+
+    let account = AutoMatchAccountStore.upsert(
+        AutoMatchAccount(platform: .steam, displayName: personaName, externalAccountID: steamID)
+    )
+    var credential = AutoMatchCredential()
+    credential.apiKey      = trimmedKey
+    credential.accountID   = steamID
+    credential.accountName = personaName
+    try credentials.save(credential, for: account)
+    return account
+}
+```
+
+The Steam key field is a `SecureField`, so the key is hidden on screen and kept out of the system's autocorrection and suggestions.
+
+## 6. Findings
+
+Severity follows a four-level scale: **High** (credentials can be obtained by another party), **Medium** (credentials exposed under realistic conditions), **Low** (defence-in-depth gap with no known path to exposure), and **Informational** (design note, no change needed).
+
+| ID | Title | Severity | Status |
+|---|---|---|---|
+| JC-01 | Nintendo callback check is less strict than PlayStation's | Low | Open — planned |
+| JC-02 | Return value of the secure random generator is not checked | Low | Open — planned |
+| JC-03 | Steam Web API key travels in the request address | Informational | Accepted (platform requirement) |
+| JC-04 | PlayStation and Nintendo interfaces are not public | Informational | Accepted, disclosed to users |
+| JC-05 | Artwork addresses from the platform are not limited to a host list | Informational | Accepted |
+
+### JC-01 · Nintendo callback check is less strict than PlayStation's — Low
+
+**Description.** The Nintendo callback check verifies the scheme, host and exact `state`, but takes the *first* `state` and `session_token_code` it finds instead of rejecting repeated parameters, and it does not check the path.
+
+**Impact.** No path to exposure is known. A planted callback would still need the correct random `state` for the attempt in progress, and the code exchange would still need the PKCE verifier, which never leaves memory.
+
+**Recommendation.** Apply the same parameter-count and path checks used for PlayStation (section 5.3).
+
+### JC-02 · Return value of the secure random generator is not checked — Low
+
+**Description.** `SecRandomCopyBytes` returns a status code that is currently ignored (section 5.2). If it ever failed, the PKCE verifier and `state` would be predictable.
+
+**Impact.** On iOS this call is not known to fail in normal operation. The sign-in would also need to be intercepted at the same moment.
+
+**Recommendation.** Check for `errSecSuccess` and stop the sign-in if the call fails.
+
+### JC-03 · Steam Web API key travels in the request address — Informational
+
+**Description.** Steam's Web API requires the key as a `key=` query parameter.
+
+**Impact.** The address is encrypted by HTTPS on the network. JoyCount does not log request addresses and sends the key only to `api.steampowered.com`.
+
+**Recommendation.** None for the app. Users should treat the key like a password (section 7).
+
+### JC-04 · PlayStation and Nintendo interfaces are not public — Informational
+
+**Description.** These platforms do not offer a public game library interface for apps like JoyCount. Auto Match uses the same sign-in and library interfaces as the platform's own mobile app.
+
+**Impact.** This is a reliability matter, not a confidentiality one: the platform may change or block the interface at any time. The app tells users this, and a failure only shows an error. The user's collection is never changed.
+
+### JC-05 · Artwork addresses from the platform are not limited to a host list — Informational
+
+**Description.** For PlayStation, artwork addresses come from the platform's own reply and are downloaded without a host list.
+
+**Impact.** These requests carry no credential (section 5.5), and the address only comes from an authenticated HTTPS reply from the platform.
+
+## 7. Residual risks for users
+
+- **Treat your Steam Web API key like a password.** A key can read any *public* Steam profile. Do not share it or paste it into other places.
+- **Steam game details must be public** in Steam's privacy settings for Auto Match to see your games. This makes the game list visible to anyone, not only to JoyCount.
+- **Someone who can unlock your device** can use JoyCount like you can. Credentials are protected by the iOS Keychain and your device passcode.
+- **PlayStation and Nintendo sign-in may stop working** if the platform changes its interface (JC-04).
+
+## 8. Revoking access
+
+| Where | How | Effect |
+|---|---|---|
+| JoyCount | Auto Match → account → **Unlink** | Credential deleted from the Keychain at once; collection kept |
+| PlayStation | Sony account security settings → sign out of all devices, or change password | Tokens held by JoyCount stop working |
+| Nintendo | Nintendo Account sign-in and security settings → sign out of all devices, or change password | Session held by JoyCount stops working |
+| Steam | `steamcommunity.com/dev/apikey` → revoke key | Key stops working at once |
+
+## 9. Reporting a vulnerability
+
+If you believe you have found a security issue in Auto Match, please open an issue in this repository describing the problem and how to reproduce it. **Never include tokens, API keys or passwords** in a report.
+
+## 10. Revision history
+
+| Version | Date | Changes |
+|---|---|---|
+| 1.0 | 22 Oct 2026 | First publication |
+| 1.1 | 22 Oct 2026 | Added architecture diagrams, threat model, source code evidence and formal findings |
