@@ -1,453 +1,401 @@
-# JoyCount Auto Match — Account Sign-in Security Assessment
+# JoyCount 3.1 — Security & Privacy Report
 
 [English](README.md) · [简体中文](README.zh-Hans.md)
 
 | | |
 |---|---|
-| **Document** | JC-SEC-2026-01 |
-| **Version** | 1.2 · 22 October 2026 |
-| **Product** | JoyCount for iOS and iPadOS, version 3.0.2 |
-| **Component** | Auto Match — PlayStation, Nintendo Switch and Steam account linking |
+| **Document** | JC-SEC-2026-02 |
+| **Version** | 1.0 · 30 October 2026 |
+| **Product** | JoyCount for iOS and iPadOS, version 3.1 |
+| **Components** | Linked accounts (PlayStation, Nintendo Switch, Steam) as used by Auto Match and the new Stats tab |
 | **Assessment type** | First-party source code review by the JoyCount developer |
+| **Replaces** | JC-SEC-2026-01 (Auto Match sign-in assessment for 3.0.2) |
 | **Status** | Final |
 
 ---
 
 ## Contents
 
-1. [Executive summary](#1-executive-summary)
-2. [Scope and method](#2-scope-and-method)
-3. [Architecture and data flow](#3-architecture-and-data-flow)
-4. [Threat model](#4-threat-model)
-5. [Security controls, with source evidence](#5-security-controls-with-source-evidence)
-6. [Findings](#6-findings)
-7. [Residual risks for users](#7-residual-risks-for-users)
-8. [Revoking access](#8-revoking-access)
-9. [Reporting a vulnerability](#9-reporting-a-vulnerability)
-10. [Revision history](#10-revision-history)
+1. [Summary](#1-summary)
+2. [What is new in 3.1](#2-what-is-new-in-31)
+3. [Scope and method](#3-scope-and-method)
+4. [What data is involved](#4-what-data-is-involved)
+5. [How data moves](#5-how-data-moves)
+6. [Threat model](#6-threat-model)
+7. [Security controls, with source evidence](#7-security-controls-with-source-evidence)
+8. [Findings](#8-findings)
+9. [What you should know](#9-what-you-should-know)
+10. [Removing your data and revoking access](#10-removing-your-data-and-revoking-access)
+11. [Reporting a vulnerability](#11-reporting-a-vulnerability)
+12. [Revision history](#12-revision-history)
 
 ---
 
-## 1. Executive summary
+## 1. Summary
 
-Auto Match reads the list of games a user owns on PlayStation, Nintendo Switch and Steam, so the user can add them to their JoyCount collection.
+JoyCount lets you link your PlayStation, Nintendo Switch and Steam accounts. **Auto Match** uses those accounts to find games you own and add them to your collection. In 3.1 the same accounts also power the new **Stats** tab, which shows play time, daily activity and achievements.
 
-This assessment reviewed how JoyCount obtains, stores, uses and deletes the credentials behind that feature. The main conclusions are:
+The main conclusions of this review are:
 
-- **Only two parties are involved: the user and the platform they sign in to.** JoyCount runs no server for Auto Match. Every request goes straight from the device to Sony, Nintendo or Valve over HTTPS.
-- **JoyCount never handles the user's platform password.** PlayStation and Nintendo sign-in happens on the platform's own web page, in a private system browser session. Steam needs no password at all.
-- **Sign-in is protected against forged or intercepted callbacks** by PKCE (S256) and a random `state` value, both made fresh for each attempt and checked strictly when the platform replies.
-- **Credentials stay on the device.** They are stored only in the iOS Keychain with *this device only* access. They are never written to iCloud sync data, backups, logs or the widget extension.
-- **Unlinking deletes the stored credential immediately.**
+- **JoyCount has no server.** Everything happens on your device. Requests go straight from the device to Sony, Nintendo or Valve over HTTPS. The developer never receives your accounts, your play history or your achievements.
+- **JoyCount never sees your platform password.** PlayStation and Nintendo sign-in happens on the platform's own page, in a private system sign-in sheet. Steam uses an API key that you create yourself.
+- **Credentials stay in this device's Keychain.** They are marked *this device only*, so they are not synced to iCloud Keychain, not restored onto another device, and not readable by the widget. They are never put in iCloud sync data, backups made by JoyCount, Excel exports or diagnostics logs.
+- **Stats adds no new place your credentials go.** The new play time, trophy and achievement requests go to the same Sony, Nintendo and Valve hosts that Auto Match already used.
+- **Play history and achievements stay on the device.** They are kept in local files, not synced with iCloud, and deleted when you unlink the account.
 
-The review found **no high or medium severity issues**. It recorded **two low severity** findings, both now **fixed**, and **three informational** findings that need no change ([section 6](#6-findings)). None of them let another party read a user's credentials.
+This review found **no high or medium severity issues**. The two low severity issues from the 3.0.2 review (JC-01, JC-02) are fixed, and 3.1 is the first App Store version that includes those fixes. One new low severity issue (JC-07) was found and fixed before release. Four informational findings need no code change and are explained in [section 8](#8-findings).
 
-## 2. Scope and method
+## 2. What is new in 3.1
+
+| Change | Security and privacy effect |
+|---|---|
+| **Stats tab** reads play time, first and last played dates, and daily play minutes | Uses the existing linked accounts. No new sign-in and no new credential. |
+| **Achievements and trophies** (Steam achievements, PlayStation trophies) | New requests to `api.steampowered.com` and `m.np.playstation.com`, the same hosts as before. |
+| **Play journal**: a daily record of play minutes built on the device | Stored only on the device. Removed for an account when it is unlinked. |
+| **Game title artwork** for Stats | Public store lookups that carry **no credential**. One lookup uses a community service, `api.steamcmd.net` (JC-06). |
+| **Linked Accounts page** in Stats | Same accounts and the same Keychain items as Auto Match. Linking or unlinking in one place applies to both. |
+| Stricter Nintendo sign-in check (JC-01) | Fixed after 3.0.2; first shipped in 3.1. |
+| Secure random check (JC-02) | Fixed after 3.0.2; first shipped in 3.1. |
+| Unlinking clears the achievement summary at once (JC-07) | Fixed in 3.1. |
+
+## 3. Scope and method
 
 ### In scope
 
 | Area | Source files |
 |---|---|
-| Sign-in user interface | `Views/AutoMatchView.swift` |
-| PlayStation sign-in and library | `Services/PSNLibraryProvider.swift` |
-| Nintendo sign-in and library | `Services/NintendoLibraryProvider.swift` |
-| Steam linking and library | `Services/SteamLibraryProvider.swift` |
+| Sign-in and account screens | `Views/AutoMatchView.swift`, `Views/StatsView.swift` |
+| PlayStation sign-in, library and trophies | `Services/PSNLibraryProvider.swift` |
+| Nintendo sign-in, library and play history | `Services/NintendoLibraryProvider.swift` |
+| Steam linking, library and achievements | `Services/SteamLibraryProvider.swift` |
 | Credential storage | `Services/AutoMatchCredentialStore.swift` |
 | Network client | `Services/AutoMatchHTTPClient.swift` |
-| Artwork download | `Services/AutoMatchCoverFetcher.swift` |
 | Account lifecycle | `Services/AutoMatchCoordinator.swift` |
+| Play journal and achievement cache | `Services/PlayActivityJournal.swift`, `Services/PlayAchievementDetails.swift` |
+| Stats artwork | `Services/StatsArtworkLookup.swift`, `Services/AutoMatchCoverFetcher.swift` |
+| iCloud sync isolation | `Services/CloudSyncEngine.swift` |
 
 ### Out of scope
 
-The platforms' own servers and sign-in pages; iOS itself; JoyCount features other than Auto Match.
+The platforms' own servers and sign-in pages; iOS itself; JoyCount features that do not use linked accounts, such as cover search, Smart Import and iCloud sync of your collection records.
 
 ### Method
 
-1. Manual line-by-line review of every file listed above.
-2. A list of every network address the component contacts, checked against platform ownership.
-3. A trace of every credential from the moment it is created to the moment it is deleted.
-4. A check of the app's network security settings (App Transport Security).
+1. Line-by-line review of every file listed above, including all changes since 3.0.2.
+2. A list of every network host these components contact, checked for who owns it and what it receives.
+3. A trace of every credential and every piece of play data, from creation to deletion.
+4. A check of the app's network security settings, Keychain settings and entitlements.
 
-The code excerpts in this report are taken from the reviewed build. They have been shortened, and comments translated, for readability. Non-security details such as the platforms' public app identifiers are left out.
+Code excerpts are taken from the 3.1 build. They are shortened, and comments are translated, for readability.
 
-## 3. Architecture and data flow
+## 4. What data is involved
 
-### 3.1 PlayStation and Nintendo
+| Data | Where it comes from | Where it is kept | Leaves the device? |
+|---|---|---|---|
+| PlayStation and Nintendo sign-in tokens | The platform, after you sign in on its page | Keychain, *this device only* | Only to the platform that issued it |
+| Steam Web API key and Steam account number | You paste them in | Keychain, *this device only* | Only to `api.steampowered.com` |
+| Linked account list (name and account number) | The platform | Local app settings | No |
+| Game library, play time, first and last played | The platform | `Application Support/AutoMatch` | No |
+| Daily play minutes (play journal) | Built on the device from what the platform reports | `Application Support/AutoMatch/play-journal.json` | No |
+| Achievements and trophies | Steam and PlayStation | `Application Support/AutoMatch` | No |
+| Artwork | Platform and store servers | `Application Support/AutoMatch` | No |
+
+Nothing in this table is sent to the JoyCount developer. Files in `Application Support` are part of the normal iPhone or iPad backup that iOS makes, like any app's data. Keychain items marked *this device only* are not restored from a backup onto a different device.
+
+## 5. How data moves
+
+### 5.1 PlayStation and Nintendo sign-in
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor U as User
+    actor U as You
     participant A as JoyCount (on device)
     participant S as System sign-in sheet<br/>(private session)
     participant P as Platform<br/>(Sony / Nintendo)
 
-    A->>A: Generate PKCE verifier + random state
-    A->>S: Open platform sign-in page<br/>(code_challenge, state)
-    U->>S: Enter password / 2FA on the platform's page
-    S->>P: Credentials go to the platform only
-    P-->>S: Redirect with authorization code + state
-    S-->>A: Callback URL
-    A->>A: Verify callback address and state exactly
+    A->>A: Make a fresh PKCE verifier and random state
+    A->>S: Open the platform's sign-in page<br/>(code_challenge, state)
+    U->>S: Enter password and 2FA on the platform's page
+    S->>P: Your password goes to the platform only
+    P-->>S: Redirect with authorization code and state
+    S-->>A: Callback address
+    A->>A: Check callback address and state exactly
     A->>P: Exchange code + PKCE verifier for tokens (HTTPS)
     P-->>A: Tokens
     A->>A: Save tokens to Keychain (this device only)
-    A->>P: Read profile name and game list (HTTPS)
 ```
 
-### 3.2 Steam
+### 5.2 Steam linking
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor U as User
+    actor U as You
     participant A as JoyCount (on device)
     participant V as Steam Web API
 
-    U->>A: Paste own Web API key + profile link
-    A->>V: Resolve profile link to account number (HTTPS)
-    A->>V: Check key by reading the profile name (HTTPS)
+    U->>A: Paste your own Web API key and profile link
+    A->>V: Turn the profile link into an account number (HTTPS)
+    A->>V: Check the key by reading the profile name (HTTPS)
     alt Key accepted
-        A->>A: Save key + account number to Keychain
+        A->>A: Save key and account number to Keychain
     else Key rejected
-        A->>A: Save nothing, show error
+        A->>A: Save nothing, show an error
     end
 ```
 
-### 3.3 Network addresses
+### 5.3 Stats refresh (new in 3.1)
 
-| Platform | Purpose | Host | Owner |
-|---|---|---|---|
-| PlayStation | Sign-in and tokens | `ca.account.sony.com` | Sony |
-| PlayStation | Profile and games | `m.np.playstation.com` | Sony |
-| Nintendo | Sign-in and tokens | `accounts.nintendo.com`, `api.accounts.nintendo.com` | Nintendo |
-| Nintendo | Play history | `app-api.znej.nintendo.com` | Nintendo |
-| Nintendo | Store data and artwork | `ec.nintendo.com`, `*.cdn.nintendo.net` | Nintendo |
-| Steam | Web API | `api.steampowered.com` | Valve |
-| Steam | Artwork | `*.steamstatic.com` | Valve |
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as JoyCount (on device)
+    participant P as Platform API<br/>(Sony / Nintendo / Valve)
+    participant St as Public stores and artwork<br/>(no credential)
 
-No other hosts are contacted by Auto Match.
+    A->>P: Library, play time and play history (with your token or key)
+    A->>P: Steam achievements / PlayStation trophies (with your token or key)
+    P-->>A: Your data
+    A->>A: Update play journal and achievement cache on the device
+    A->>St: Look up title artwork by game ID or name (no token, no key)
+    St-->>A: Image addresses and images
+```
 
-## 4. Threat model
+### 5.4 Network hosts
+
+| Platform | Purpose | Host | Owner | Carries a credential |
+|---|---|---|---|---|
+| PlayStation | Sign-in and tokens | `ca.account.sony.com` | Sony | Yes |
+| PlayStation | Profile, games, play time, trophies | `m.np.playstation.com` | Sony | Yes |
+| PlayStation | Store search for title artwork | `web.np.playstation.com` | Sony | No |
+| Nintendo | Sign-in and tokens | `accounts.nintendo.com`, `api.accounts.nintendo.com` | Nintendo | Yes |
+| Nintendo | Play history | `app-api.znej.nintendo.com` | Nintendo | Yes |
+| Nintendo | Store data and artwork | `ec.nintendo.com`, `www.nintendo.com.hk`, `*.cdn.nintendo.net` | Nintendo | No |
+| Steam | Web API: library, profile, achievements | `api.steampowered.com` | Valve | Yes |
+| Steam | Store search for title artwork | `store.steampowered.com` | Valve | No |
+| Steam | Artwork | `*.steamstatic.com` | Valve | No |
+| Steam | Title logo lookup | `api.steamcmd.net` | Community service, not Valve | No (JC-06) |
+
+No other hosts are contacted by these components.
+
+## 6. Threat model
 
 | ID | Threat | Example | Mitigation | Section |
 |---|---|---|---|---|
-| T1 | Password captured by the app | App shows its own login form | Sign-in only on the platform's page in a system sheet | 5.1 |
-| T2 | Session reused or mixed up | Second account signs in as the first | Private (ephemeral) browser session | 5.1 |
-| T3 | Authorization code intercepted | Another app registers the same callback | PKCE S256 binds the code to this device | 5.2 |
-| T4 | Forged sign-in reply (CSRF) | A web link opens the callback with a planted code | Random `state`, checked exactly | 5.2, 5.3 |
-| T5 | Credentials copied off the device | Through iCloud sync, backup or file sharing | Keychain, *this device only*, never in sync data | 5.4 |
-| T6 | Credentials sent in clear text | Network on public Wi-Fi | HTTPS only, enforced by iOS | 5.5 |
-| T7 | Credentials leak to another host | Artwork server receives a token | Tokens sent only to platform API hosts | 5.5 |
-| T8 | Credentials left behind | User unlinks but key stays | Unlink deletes the Keychain item | 5.6 |
-| T9 | Bad key saved | Typo stored and retried forever | Key verified with Steam before saving | 5.7 |
-| T10 | Server text injected into the UI | Misleading error message | Platform error descriptions are never shown | 5.3 |
+| T1 | Password captured by the app | App shows its own login form | Sign-in only on the platform's page, in a system sheet | 7.1 |
+| T2 | Session reused or mixed up | A second account signs in as the first | Private (ephemeral) sign-in session | 7.1 |
+| T3 | Authorization code intercepted | Another app claims the same callback | PKCE S256 ties the code to this attempt | 7.2 |
+| T4 | Forged sign-in reply | A web link opens the callback with a planted code | Random `state`, checked exactly | 7.2, 7.3 |
+| T5 | Credentials copied off the device | Through iCloud sync, backup or file sharing | Keychain, *this device only*, never in sync data | 7.4 |
+| T6 | Credentials sent in clear text | Public Wi-Fi | HTTPS only, enforced by iOS | 7.5 |
+| T7 | Credentials sent to the wrong host | An artwork server receives a token | Credentials only go to platform API hosts | 7.5, 7.6 |
+| T8 | Data left behind after unlinking | Key or play history remains | Unlink deletes the credential, play journal and achievement data | 7.7 |
+| T9 | Play history shared without consent | Activity synced or uploaded | Play data stays in local files, never synced or uploaded | 7.8 |
+| T10 | Server text shown in the app | Misleading error message | Platform error descriptions are never shown | 7.3 |
 
-## 5. Security controls, with source evidence
+## 7. Security controls, with source evidence
 
-### 5.1 Sign-in on the platform's own page, in a private session (T1, T2)
+### 7.1 Sign-in on the platform's own page, in a private session (T1, T2)
 
-JoyCount has no password field for PlayStation or Nintendo. It uses `ASWebAuthenticationSession`, the iOS system sign-in sheet. The app cannot read or change what the user types into it. `prefersEphemeralWebBrowserSession` makes iOS start a clean session with no shared cookies, and throw it away afterwards.
+JoyCount has no password field for PlayStation or Nintendo. It uses `ASWebAuthenticationSession`, the iOS system sign-in sheet, which the app cannot read or change. With `prefersEphemeralWebBrowserSession`, iOS starts a clean session with no shared cookies and throws it away afterwards.
 
 ```swift
 // Views/AutoMatchView.swift — AutoMatchWebLogin
-private func present(url: URL, scheme: String) async throws -> URL {
-    try await withCheckedThrowingContinuation { continuation in
-        let session = ASWebAuthenticationSession(url: url, callbackURLScheme: scheme) { callbackURL, error in
-            if let error {
-                continuation.resume(throwing: error)
-            } else if let callbackURL {
-                continuation.resume(returning: callbackURL)
-            } else {
-                continuation.resume(throwing: AutoMatchError.invalidResponse)
-            }
-        }
-        session.presentationContextProvider = AutoMatchPresentationAnchorProvider.shared
-        // Private session: no cookies from Safari or from an earlier sign-in.
-        session.prefersEphemeralWebBrowserSession = true
-        self.session = session
-        if !session.start() {
-            continuation.resume(throwing: AutoMatchError.server("session"))
-        }
-    }
+let session = ASWebAuthenticationSession(url: url, callbackURLScheme: scheme) { callbackURL, error in
+    // …
 }
+session.presentationContextProvider = AutoMatchPresentationAnchorProvider.shared
+// Private session: no cookies from Safari or from an earlier sign-in.
+session.prefersEphemeralWebBrowserSession = true
 ```
 
-If the user leaves the screen, the pending sign-in is cancelled (`webLogin.cancel()` in `onDisappear`).
+Stats does not add a second sign-in. Its Linked Accounts page opens the same account screens as Auto Match.
 
-### 5.2 PKCE and `state` made fresh for every attempt (T3, T4)
+### 7.2 PKCE and `state` made fresh for every attempt (T3, T4)
 
-Each sign-in creates a new 256-bit PKCE verifier and a new random `state` from the system's secure random number generator. Only the SHA-256 hash of the verifier (the *challenge*) goes into the sign-in address. The verifier itself stays in memory and is sent only once, in the HTTPS code exchange. An intercepted authorization code is useless without it.
+Each sign-in makes a new 256-bit PKCE verifier and a new random `state` with the system's secure random generator. Only the SHA-256 hash of the verifier goes into the sign-in address. If the generator fails, sign-in stops instead of using predictable values (JC-02, fixed).
 
 ```swift
 // Services/PSNLibraryProvider.swift
-static func makeAuthorizationRequest() throws -> (url: URL, state: String, codeVerifier: String) {
-    let verifier  = try Self.randomURLSafeString(byteCount: 32)   // 256-bit secret, never leaves memory
-    let challenge = Self.sha256Base64URL(verifier)                // only the hash is sent
-    let state     = try Self.randomURLSafeString(byteCount: 16)
-
-    var components = URLComponents(string: Self.authBase + "/authorize")
-    components?.queryItems = [
-        URLQueryItem(name: "response_type",         value: "code"),
-        URLQueryItem(name: "redirect_uri",          value: Self.redirectURI),
-        URLQueryItem(name: "code_challenge",        value: challenge),
-        URLQueryItem(name: "code_challenge_method", value: "S256"),
-        URLQueryItem(name: "state",                 value: state),
-        // client_id and scope omitted
-    ]
-    guard let url = components?.url else { throw AutoMatchError.invalidURL }
-    return (url, state, verifier)
-}
+let verifier  = try Self.randomURLSafeString(byteCount: 32)   // 256-bit secret, stays in memory
+let challenge = Self.sha256Base64URL(verifier)                // only the hash is sent
+let state     = try Self.randomURLSafeString(byteCount: 16)
 
 static func randomURLSafeString(byteCount: Int) throws -> String {
     var bytes = [UInt8](repeating: 0, count: byteCount)
-    // If the system generator ever fails, refuse to sign in rather than
-    // fall back to predictable bytes (finding JC-02, fixed).
     guard SecRandomCopyBytes(kSecRandomDefault, byteCount, &bytes) == errSecSuccess else {
         throw AutoMatchError.server("random")
     }
     return Data(bytes).base64URLEncodedString()
 }
-
-static func sha256Base64URL(_ input: String) -> String {
-    Data(SHA256.hash(data: Data(input.utf8))).base64URLEncodedString()
-}
 ```
 
-Nintendo uses the same pattern with a 288-bit `state`. Nintendo names the PKCE fields differently (`session_token_code_challenge`), but the protection is the same.
+Nintendo uses the same pattern with a 288-bit `state`.
 
-### 5.3 Strict checks on the sign-in reply (T4, T10)
+### 7.3 Strict checks on the sign-in reply (T4, T10)
 
-The reply from the platform arrives as a URL that any app or web page could also try to open, so JoyCount treats it as untrusted input. For PlayStation, every part of the reply must match exactly before the code is accepted:
-
-```swift
-// Services/PSNLibraryProvider.swift
-static func authorizationCode(from url: URL, expectedState: String) throws -> String {
-    guard let allowed  = URLComponents(string: redirectURI),
-          let callback = URLComponents(url: url, resolvingAgainstBaseURL: false),
-          callback.scheme?.lowercased() == allowed.scheme?.lowercased(),
-          callback.host?.lowercased()   == allowed.host?.lowercased(),
-          callback.percentEncodedPath.isEmpty || callback.percentEncodedPath == "/",
-          callback.user == nil, callback.password == nil,
-          callback.port == nil, callback.fragment == nil,
-          !expectedState.isEmpty else {
-        throw AutoMatchError.invalidResponse
-    }
-
-    let items  = callback.queryItems ?? []
-    let states = items.filter { $0.name == "state" }
-    let codes  = items.filter { $0.name == "code" }
-    let errors = items.filter { $0.name == "error" }
-
-    // Exactly one state, and it must be ours. No duplicated parameters.
-    // A reply carries either a code or an error, never both.
-    guard states.count == 1, states.first?.value == expectedState,
-          codes.count <= 1, errors.count <= 1,
-          codes.isEmpty || errors.isEmpty else {
-        throw AutoMatchError.invalidResponse
-    }
-
-    if let error = errors.first {
-        // error_description is untrusted server text: never shown in the UI.
-        if error.value == "login_required" || error.value == "invalid_grant" {
-            throw AutoMatchError.reauthRequired(.playStation)
-        }
-        throw AutoMatchError.server(error.value ?? "unknown")
-    }
-
-    guard let code = codes.first?.value, !code.isEmpty else {
-        throw AutoMatchError.invalidResponse
-    }
-    return code
-}
-```
-
-The Nintendo check applies the same rules: scheme, host and path must match, and `state` and the code must each appear exactly once (finding JC-01, fixed).
+The reply arrives as an address that any app or web page could try to open, so JoyCount treats it as untrusted. For both PlayStation and Nintendo, the scheme, host and path must match exactly, and `state` and the code must each appear exactly once. Nintendo was brought up to this standard after 3.0.2 (JC-01, fixed).
 
 ```swift
 // Services/NintendoLibraryProvider.swift
-// Nintendo returns its parameters in the URL fragment, so fragment and query
-// are read together, and each parameter must appear exactly once across both.
+// Nintendo puts its parameters in the URL fragment, so fragment and query are
+// read together, and each parameter must appear exactly once across both.
 let states = items.filter { $0.name == "state" }
 let codes  = items.filter { $0.name == "session_token_code" }
 guard states.count == 1, states.first?.value == expectedState,
       codes.count == 1, let code = codes.first?.value, !code.isEmpty else {
     throw AutoMatchError.invalidResponse
 }
-return code
 ```
 
-### 5.4 Keychain storage, this device only, never synced (T5)
+Error descriptions sent by the platform are never shown in the app.
 
-All Auto Match credentials go through a single type, `AutoMatchCredential`, which is only ever written to the Keychain. Each linked account has its own Keychain item.
+### 7.4 Keychain storage, this device only, never synced (T5)
+
+All credentials go through one type, `AutoMatchCredential`, which is only ever written to the Keychain, one item per linked account. This code is unchanged since 3.0.2.
 
 ```swift
 // Services/AutoMatchCredentialStore.swift
-func save(_ credential: AutoMatchCredential, key: String) throws {
-    let data = try JSONEncoder().encode(credential)
-    let attributes: [String: Any] = [kSecValueData as String: data]
-    let updateStatus = SecItemUpdate(baseQuery(key: key) as CFDictionary, attributes as CFDictionary)
-    if updateStatus == errSecSuccess { return }
-    guard updateStatus == errSecItemNotFound else {
-        throw AutoMatchKeychainError(status: updateStatus, operation: "update")
-    }
-
-    var addQuery = baseQuery(key: key)
-    addQuery[kSecValueData as String] = data
-    // Readable after first unlock; never synced to iCloud Keychain,
-    // never restored onto a different device.
-    addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-    let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-    guard addStatus == errSecSuccess else {
-        throw AutoMatchKeychainError(status: addStatus, operation: "add")
-    }
-}
+var addQuery = baseQuery(key: key)
+addQuery[kSecValueData as String] = data
+// Readable after first unlock; never synced to iCloud Keychain,
+// never restored onto a different device.
+addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 ```
 
-The design rules are:
+- **No Keychain access group** is declared, so the widget extension cannot read these items.
+- **Never in iCloud sync data, Excel backups or diagnostics logs.** None of that code refers to `AutoMatchCredential`.
+- **The account list holds no secrets.** It keeps only the display name and account number.
 
-- **Not shared with extensions.** No Keychain access group is declared for these items. The widget extension cannot read them.
-- **Never in iCloud sync data.** JoyCount's iCloud sync files can be seen by the user in the Files app. Credentials are kept out of that format on purpose, and the sync code has no reference to `AutoMatchCredential`.
-- **Account list is kept apart from secrets.** The list of linked accounts (display name and account number only) is kept in local app settings, with no token or key.
-- **Safe migration.** When credentials are moved from the old storage format, the new item is written before the old one is deleted. A failure never loses a credential.
+### 7.5 Transport security (T6, T7)
 
-### 5.5 Transport security (T6, T7)
+- The app declares **no App Transport Security exceptions**. iOS refuses any connection that is not HTTPS with a valid certificate.
+- Every address in [section 5.4](#54-network-hosts) is a fixed `https://` constant.
+- Request addresses, tokens and keys are not written to logs.
 
-- The app declares **no App Transport Security exceptions** (`NSAppTransportSecurity` is absent). iOS therefore refuses any non-HTTPS connection, and any HTTPS connection without a valid certificate, before a request is sent.
-- Every Auto Match address is a hard-coded `https://` constant pointing at the platform (section 3.3).
-- **Tokens and keys are sent only to platform API hosts.** The artwork downloader builds its own plain request that carries no credential:
+### 7.6 Stats artwork requests carry no credential (T7)
+
+Title artwork for Stats is looked up in public stores. These requests are made without any token or key. For example, the Steam logo lookup:
+
+```swift
+// Services/StatsArtworkLookup.swift
+guard let url = URL(string: "https://api.steamcmd.net/v1/info/\(appID)") else { throw AutoMatchError.invalidURL }
+// No headers: no token, no Steam key. Only the public game ID is sent.
+let envelope = try await AutoMatchHTTPClient().getJSON(url, as: SteamCMDEnvelope.self, timeout: 10)
+```
+
+Images are downloaded with a plain request that only asks for an image:
 
 ```swift
 // Services/AutoMatchCoverFetcher.swift
-var request = URLRequest(url: cover.url)
-request.timeoutInterval = 30
+var request = URLRequest(url: url)
 request.setValue("image/*", forHTTPHeaderField: "Accept")   // no Authorization header, no key
-let (data, response) = try await session.data(for: request)
 ```
 
-- The app never builds credentials into its binary. The shared HTTP client has no fallback key. Every credential it uses belongs to the user.
-
-### 5.6 Unlinking deletes the credential (T8)
+### 7.7 Unlinking deletes the credential and the play data (T8)
 
 ```swift
 // Services/AutoMatchCoordinator.swift
 func unlink(_ account: AutoMatchAccount) {
-    provider(for: account).disconnect()   // SecItemDelete on this account's Keychain item
+    provider(for: account).disconnect()          // deletes this account's Keychain item
     AutoMatchAccountStore.remove(account)
     AutoMatchSeenGames.removeBaseline(for: account)
-    snapshot.removeAccount(account.id)
+    snapshot.removeAccount(account.id)           // games only this account owns
     persist()
+    PlayActivityJournalStore.prune(account: account.id, platform: platform, keeping: snapshot.games)
+    PlayAchievementDetailStore.removeAccount(account.id)   // per-game achievement lists
+    PlayAchievementStore.removeAccount(account.id)         // achievement summary (JC-07, fixed)
     reloadAccounts()
     rebuildDrafts()
 }
 ```
 
-Deleting an item that is already gone counts as success, so unlinking always completes. Games already in the user's collection are kept, because they are the user's own records.
+Deleting an item that is already gone counts as success, so unlinking always completes. Games already in your collection are kept, because they are your own records.
 
-### 5.7 Steam key is verified before it is saved (T9)
+### 7.8 Play data stays on the device (T9)
 
-```swift
-// Services/SteamLibraryProvider.swift
-static func link(apiKey: String, accountInput: String, /* … */) async throws -> AutoMatchAccount {
-    let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmedKey.isEmpty else { throw AutoMatchError.invalidSteamKey }
+The play journal, achievement cache and Stats artwork cache are plain local files in the app's `Application Support/AutoMatch` folder. They are not part of JoyCount's iCloud sync format, are not included in Excel exports, and are never uploaded anywhere. JoyCount has no analytics or tracking for this data.
 
-    let steamID = try await probe.resolveSteamID(accountInput, apiKey: trimmedKey)
-    // Ask Steam for this profile's name with the key. If Steam rejects the key,
-    // or the profile does not match, stop here: nothing is written.
-    guard let summary = try await probe.playerSummary(steamID: steamID, apiKey: trimmedKey),
-          let personaName = summary.personaname, !personaName.isEmpty else {
-        throw AutoMatchError.invalidSteamKey
-    }
+### 7.9 The Steam key is checked before it is saved
 
-    let account = AutoMatchAccountStore.upsert(
-        AutoMatchAccount(platform: .steam, displayName: personaName, externalAccountID: steamID)
-    )
-    var credential = AutoMatchCredential()
-    credential.apiKey      = trimmedKey
-    credential.accountID   = steamID
-    credential.accountName = personaName
-    try credentials.save(credential, for: account)
-    return account
-}
-```
+When you link Steam, JoyCount asks Steam for your profile name using the key. If Steam rejects the key, or the profile does not match, nothing is saved. The key field is a `SecureField`, so the key is hidden on screen and kept out of autocorrection and suggestions.
 
-The Steam key field is a `SecureField`, so the key is hidden on screen and kept out of the system's autocorrection and suggestions.
+## 8. Findings
 
-## 6. Findings
-
-Severity follows a four-level scale: **High** (credentials can be obtained by another party), **Medium** (credentials exposed under realistic conditions), **Low** (defence-in-depth gap with no known path to exposure), and **Informational** (design note, no change needed).
+Severity uses four levels: **High** (another party can obtain credentials or private data), **Medium** (exposure under realistic conditions), **Low** (a defence-in-depth gap with no known path to exposure), and **Informational** (a design note, no change needed).
 
 | ID | Title | Severity | Status |
 |---|---|---|---|
-| JC-01 | Nintendo callback check is less strict than PlayStation's | Low | **Fixed** |
-| JC-02 | Return value of the secure random generator is not checked | Low | **Fixed** |
-| JC-03 | Steam Web API key travels in the request address | Informational | Accepted (platform requirement) |
-| JC-04 | PlayStation and Nintendo interfaces are not public | Informational | Accepted, disclosed to users |
-| JC-05 | Artwork addresses from the platform are not limited to a host list | Informational | Accepted |
+| JC-01 | Nintendo callback check was less strict than PlayStation's | Low | **Fixed, first shipped in 3.1** |
+| JC-02 | Return value of the secure random generator was not checked | Low | **Fixed, first shipped in 3.1** |
+| JC-07 | Achievement summary was kept until the next Stats refresh after unlinking | Low | **Fixed in 3.1** |
+| JC-03 | Steam Web API key travels in the request address | Informational | Accepted (Steam requires it) |
+| JC-04 | PlayStation and Nintendo interfaces are not public | Informational | Accepted, shown to users |
+| JC-05 | Artwork addresses from platforms are not limited to a host list | Informational | Accepted |
+| JC-06 | Steam title logos are looked up through a community service | Informational | Accepted, disclosed here |
 
-*Fixed* means fixed in the source code. The fixes reach users in the next App Store update after 3.0.2. The descriptions below explain the behaviour as it was in 3.0.2.
+### JC-01 · Nintendo callback check was less strict than PlayStation's — Low · Fixed
 
-### JC-01 · Nintendo callback check is less strict than PlayStation's — Low
+In 3.0.2 the Nintendo check used the first `state` and code it found, and did not check the path. A planted reply would still have needed the correct random `state` and the PKCE verifier, so no path to exposure was known. The check now matches PlayStation's (section 7.3) and is covered by automated tests.
 
-**Description.** The Nintendo callback check verifies the scheme, host and exact `state`, but takes the *first* `state` and `session_token_code` it finds instead of rejecting repeated parameters, and it does not check the path.
+### JC-02 · Return value of the secure random generator was not checked — Low · Fixed
 
-**Impact.** No path to exposure is known. A planted callback would still need the correct random `state` for the attempt in progress, and the code exchange would still need the PKCE verifier, which never leaves memory.
+In 3.0.2 the status returned by `SecRandomCopyBytes` was ignored. The call is not known to fail on iOS. It is now checked, and sign-in stops with an error if it fails (section 7.2).
 
-**Resolution.** The Nintendo check now applies the same scheme, host, path and parameter-count rules as PlayStation. A reply with a repeated `state` or code, including one repeated across the fragment and the query, is rejected. Covered by automated tests (section 5.3).
+### JC-07 · Achievement summary was kept until the next Stats refresh after unlinking — Low · Fixed
 
-### JC-02 · Return value of the secure random generator is not checked — Low
+**Description.** In development builds of 3.1, unlinking an account deleted its credential, play journal and per-game achievement lists at once, but the account's achievement summary (`achievements.json`) was only removed the next time Stats refreshed.
 
-**Description.** `SecRandomCopyBytes` returns a status code that is currently ignored (section 5.2). If it ever failed, the PKCE verifier and `state` would be predictable.
+**Impact.** The file stayed inside the app's own storage on the device. It held no credential and was never sent anywhere.
 
-**Impact.** On iOS this call is not known to fail in normal operation. The sign-in would also need to be intercepted at the same moment.
-
-**Resolution.** The return value is now checked for both platforms. If the call fails, the sign-in stops with an error and nothing is sent to the platform (section 5.2).
+**Resolution.** Unlinking now removes the account's entries from the achievement summary immediately (section 7.7). This was fixed before 3.1 was released.
 
 ### JC-03 · Steam Web API key travels in the request address — Informational
 
-**Description.** Steam's Web API requires the key as a `key=` query parameter.
-
-**Impact.** The address is encrypted by HTTPS on the network. JoyCount does not log request addresses and sends the key only to `api.steampowered.com`.
-
-**Recommendation.** None for the app. Users should treat the key like a password (section 7).
+Steam's Web API requires the key as a `key=` query parameter. HTTPS encrypts the full address on the network, JoyCount does not log request addresses, and the key is only sent to `api.steampowered.com`. Treat the key like a password (section 9).
 
 ### JC-04 · PlayStation and Nintendo interfaces are not public — Informational
 
-**Description.** These platforms do not offer a public game library interface for apps like JoyCount. Auto Match uses the same sign-in and library interfaces as the platform's own mobile app.
+These platforms offer no public interface for apps like JoyCount. JoyCount uses the same sign-in and data interfaces as the platforms' own mobile apps. This affects reliability, not confidentiality: the platform may change or block them at any time. A failure only shows an error and never changes your collection. The app tells you this before you link.
 
-**Impact.** This is a reliability matter, not a confidentiality one: the platform may change or block the interface at any time. The app tells users this, and a failure only shows an error. The user's collection is never changed.
+### JC-05 · Artwork addresses from platforms are not limited to a host list — Informational
 
-### JC-05 · Artwork addresses from the platform are not limited to a host list — Informational
+Some artwork addresses come from the platform's own HTTPS reply and are downloaded without a host list. These downloads carry no credential (section 7.6).
 
-**Description.** For PlayStation, artwork addresses come from the platform's own reply and are downloaded without a host list.
+### JC-06 · Steam title logos are looked up through a community service — Informational
 
-**Impact.** These requests carry no credential (section 5.5), and the address only comes from an authenticated HTTPS reply from the platform.
+**Description.** To show a game's title logo in Stats, JoyCount first tries Valve's own fixed logo addresses. Some games keep their logo under a file name that Steam's public Web API does not return. Only for those games does JoyCount ask `api.steamcmd.net`, a community-run service that mirrors public Steam app information.
 
-## 7. Residual risks for users
+**Impact.** The request contains only the public Steam app ID of a game you play, with no token, key or account number. Like any web server, the service can see your IP address, so it could in principle learn which Steam games are being looked up from that address. It cannot link this to your Steam account.
 
-- **Treat your Steam Web API key like a password.** A key can read any *public* Steam profile. Do not share it or paste it into other places.
-- **Steam game details must be public** in Steam's privacy settings for Auto Match to see your games. This makes the game list visible to anyone, not only to JoyCount.
-- **Someone who can unlock your device** can use JoyCount like you can. Credentials are protected by the iOS Keychain and your device passcode.
-- **PlayStation and Nintendo sign-in may stop working** if the platform changes its interface (JC-04).
+**Recommendation.** No change needed. Results are cached on the device, so each game is looked up at most once in a while. If the service is unavailable, Stats shows the game's name as text instead of a logo.
 
-## 8. Revoking access
+## 9. What you should know
+
+- **Treat your Steam Web API key like a password.** Do not share it or paste it anywhere else.
+- **Steam game details must be public** in Steam's privacy settings for JoyCount to read your games and play time. This makes them visible to anyone, not only to JoyCount.
+- **Someone who can unlock your device** can open JoyCount as you can. Your data is protected by the iOS Keychain and your device passcode.
+- **PlayStation and Nintendo access may stop working** if the platform changes its interface (JC-04).
+- **Play history in Stats only covers what the platform reports.** Nintendo reports daily minutes for roughly the last week. JoyCount builds a longer history on the device over time, and that history never leaves the device.
+
+## 10. Removing your data and revoking access
 
 | Where | How | Effect |
 |---|---|---|
-| JoyCount | Auto Match → account → **Unlink** | Credential deleted from the Keychain at once; collection kept |
-| PlayStation | Sony account security settings → sign out of all devices, or change password | Tokens held by JoyCount stop working |
-| Nintendo | Nintendo Account sign-in and security settings → sign out of all devices, or change password | Session held by JoyCount stops working |
-| Steam | `steamcommunity.com/dev/apikey` → revoke key | Key stops working at once |
+| JoyCount | Stats → Linked Accounts, or Auto Match → account → **Unlink** | Credential deleted from the Keychain; the account's play journal, achievements and games only it owns are removed; your collection records are kept |
+| JoyCount | Delete the app | The app's files, including play data, are removed. iOS may keep Keychain items after an app is deleted, so **unlink first** to be sure the credential is gone. |
+| PlayStation | Sony account security settings → sign out of all devices, or change your password | Tokens held by JoyCount stop working |
+| Nintendo | Nintendo Account sign-in and security settings → sign out of all devices, or change your password | The session held by JoyCount stops working |
+| Steam | `steamcommunity.com/dev/apikey` → revoke the key | The key stops working at once |
 
-## 9. Reporting a vulnerability
+## 11. Reporting a vulnerability
 
-If you believe you have found a security issue in Auto Match, please open an issue in this repository describing the problem and how to reproduce it. **Never include tokens, API keys or passwords** in a report.
+If you think you have found a security or privacy issue in JoyCount, please open an issue in this repository describing the problem and how to reproduce it. **Never include tokens, API keys or passwords** in a report.
 
-## 10. Revision history
+## 12. Revision history
 
-| Version | Date | Changes |
-|---|---|---|
-| 1.0 | 22 Oct 2026 | First publication |
-| 1.1 | 22 Oct 2026 | Added architecture diagrams, threat model, source code evidence and formal findings |
-| 1.2 | 22 Oct 2026 | JC-01 and JC-02 fixed; code evidence updated |
+| Document | Version | Date | Changes |
+|---|---|---|---|
+| JC-SEC-2026-02 | 1.0 | 30 Oct 2026 | New report for JoyCount 3.1. Covers Stats and Linked Accounts, adds the privacy data inventory, findings JC-06 and JC-07, and the status of JC-01 and JC-02 in a shipped version. |
+| JC-SEC-2026-01 | 1.0–1.2 | 22 Oct 2026 | Auto Match sign-in assessment for 3.0.2. Replaced by this report; still available in this repository's history. |
